@@ -1,10 +1,10 @@
-## Clippy - Clipboard Manager
+## Clippo - Clipboard Manager
 
-**Clippy** is a powerful, cross-platform clipboard manager designed to help you easily retrieve and manage past clipboard entries. With a sleek minimal user interface and a background daemon, Clippy ensures that your clipboard history is always accessible.
+**Clippo** is a powerful, cross-platform clipboard manager designed to help you easily retrieve and manage past clipboard entries. With a sleek minimal user interface and a background daemon, Clippo ensures that your clipboard history is always accessible.
 
-Whether you're a developer, writer, or power user, Clippy simplifies your workflow by keeping track of everything you copy.
+Whether you're a developer, writer, or power user, Clippo simplifies your workflow by keeping track of everything you copy.
 
-![Clippy Screenshot](./screenshot.png)
+![Clippo Screenshot](./screenshot.png)
 
 ---
 
@@ -21,7 +21,7 @@ Whether you're a developer, writer, or power user, Clippy simplifies your workfl
 
 ---
 
-![Clippy Screenshot 2](./screenshot2.png)
+![Clippo Screenshot 2](./screenshot2.png)
 
 ## Installation
 
@@ -32,9 +32,9 @@ _You need to have `Rust` and `Cargo` installed on your machine to run this tool.
 ### Linux
 
 ```bash
-git clone https://github.com/Rayanworkout/clippy.git
+git clone https://github.com/Rayanworkout/clippo.git
 
-cd clippy
+cd clippo
 
 cargo build --release
 

@@ -15,12 +15,12 @@ const MAX_HISTORY_LENGTH: usize = 100;
 const CLIPBOARD_REFRESH_RATE_MS: u64 = 800;
 
 const STREAM_MAX_RETRIES: u32 = 5;
-pub struct Clippy {
+pub struct Clippo {
     clipboard: Mutex<Clipboard>,
     history: Mutex<Vec<String>>,
 }
 
-impl Clippy {
+impl Clippo {
     pub fn new() -> Result<Self> {
         // Instanciate a clipboard object that will be used to access
         // or update the system clipboard.
@@ -99,11 +99,13 @@ impl Clippy {
                         }
                     }
                     Err(clipboard_content_error) => {
-                        tracing::error!("Error getting the clipboard content: {clipboard_content_error}");
+                        tracing::error!(
+                            "Error getting the clipboard content: {clipboard_content_error}"
+                        );
                         consecutive_clipboard_failures += 1;
                         // Setting an empty value to the clipboard in case it is empty, to prevent errors
                         tracing::info!("Setting an arbitrary value to the clipboard to prevent read issues ...");
-                        clipboard.set_text("Hello Clippy !")?;
+                        clipboard.set_text("Hello Clippo !")?;
 
                         if consecutive_clipboard_failures == 3 {
                             panic!("Error getting the clipboard content 3 times in a row, aborting daemon run.")
@@ -123,7 +125,7 @@ impl Clippy {
     /// having an up to date history as long as the clipboard daemon is running.
     /// We use a simple retry mechanism in case some requests fail.
     pub fn listen_for_ui(self: Arc<Self>) {
-        let clippy = Arc::clone(&self);
+        let clippo = Arc::clone(&self);
         thread::spawn(move || -> Result<()> {
             let mut buffer = [0; 512];
 
@@ -143,7 +145,7 @@ impl Clippy {
                     let request = String::from_utf8_lossy(&buffer[..size]);
 
                     if request.trim() == "GET_HISTORY" {
-                        clippy
+                        clippo
                             .send_history(stream.try_clone()?)
                             .context("Could not send the history to UI, stream.write() failed.")?;
 
@@ -151,7 +153,7 @@ impl Clippy {
                             "\"GET_HISTORY\" request received, sending current history to UI ..."
                         );
                     } else if request.trim() == "RESET_HISTORY" {
-                        clippy
+                        clippo
                             .clear_history()
                             .context("Could not clear history after UI request.")?;
 

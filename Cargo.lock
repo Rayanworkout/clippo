@@ -613,7 +613,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "clippy"
+name = "clippo"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -26,27 +26,27 @@ fi
 
 # Move the files to the destination directory
 echo "Installing daemon binary to $DEST_DIR..."
-sudo mv "$BUILD_DIR/daemon" "$DEST_DIR/clippy_daemon"
+sudo mv "$BUILD_DIR/daemon" "$DEST_DIR/clippo_daemon"
 
 echo "Installing ui binary to $DEST_DIR..."
-sudo mv "$BUILD_DIR/ui" "$DEST_DIR/clippy_ui"
+sudo mv "$BUILD_DIR/ui" "$DEST_DIR/clippo_ui"
 
 # Make sure the binaries are executable
 echo "Setting execute permissions on the binaries..."
-sudo chmod +x "$DEST_DIR/clippy_daemon" "$DEST_DIR/clippy_ui"
+sudo chmod +x "$DEST_DIR/clippo_daemon" "$DEST_DIR/clippo_ui"
 
 # Copying service file
-if [ ! -f "./clippy_daemon.service" ]; then
+if [ ! -f "./clippo_daemon.service" ]; then
     echo "The service file was not found. It should be downloaded from the repo and put nex to this script."
     exit 1
 fi
 
-sudo cp "./clippy_daemon.service" "/etc/systemd/system"
+sudo cp "./clippo_daemon.service" "/etc/systemd/system"
 
 echo "Installation complete, launching the daemon and the ui ..."
 
-sudo systemctl daemon-reload && sudo systemctl --now enable clippy_daemon.service
+sudo systemctl daemon-reload && sudo systemctl --now enable clippo_daemon.service
 
-nohup clippy_ui &>/dev/null &
+nohup clippo_ui &>/dev/null &
 
 

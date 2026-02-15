@@ -1,8 +1,8 @@
-use crate::clippy_app::ClippyApp;
+use crate::clippo_app::ClippoApp;
 
 use eframe::egui;
 
-impl eframe::App for ClippyApp {
+impl eframe::App for ClippoApp {
     // Handles UI updates.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Setting style once only
@@ -136,7 +136,7 @@ impl eframe::App for ClippyApp {
                 ui.add_space(7.);
                 ui.add(egui::Hyperlink::from_label_and_url(
                     "Source Code",
-                    "https://github.com/Rayanworkout/clippy",
+                    "https://github.com/Rayanworkout/clippo",
                 ))
             });
             ui.add_space(7.);

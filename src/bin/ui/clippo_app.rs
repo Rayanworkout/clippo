@@ -1,4 +1,4 @@
-use crate::config::ClippyConfig;
+use crate::config::ClippoConfig;
 use crate::DAEMON_LISTENING_PORT;
 use crate::DAEMON_SENDING_PORT;
 use anyhow::{anyhow, Context, Result};
@@ -11,29 +11,29 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 #[derive(Clone)]
-pub struct ClippyApp {
+pub struct ClippoApp {
     pub history_cache: Arc<Mutex<Vec<String>>>,
     pub search_query: String,
-    pub config: ClippyConfig,
+    pub config: ClippoConfig,
     pub style_needs_update: bool,
 }
 
-impl ClippyApp {
+impl ClippoApp {
     pub fn new() -> Self {
         let empty_cache = Vec::new();
 
-        let clippy = ClippyApp {
+        let clippo = ClippoApp {
             history_cache: Arc::new(Mutex::new(empty_cache)),
             search_query: String::new(),
-            config: confy::load("clippy", None).unwrap_or_default(),
+            config: confy::load("clippo", None).unwrap_or_default(),
             style_needs_update: true,
         };
 
-        if let Err(initial_history_error) = clippy.fill_initial_history() {
-            tracing::error!("An error occured when loading initial history in Clippy UI: {initial_history_error}.");
+        if let Err(initial_history_error) = clippo.fill_initial_history() {
+            tracing::error!("An error occured when loading initial history in Clippo UI: {initial_history_error}.");
         }
 
-        clippy
+        clippo
     }
 
     /// This method is used inside the UI (preferences)
@@ -48,12 +48,12 @@ impl ClippyApp {
         ];
 
         if !allowed_settings.contains(&field_name) {
-            tracing::error!("An invalid value was passed to ClippyApp.toggle_config_field()");
+            tracing::error!("An invalid value was passed to ClippoApp.toggle_config_field()");
             return;
         }
 
         // Save the updated configuration
-        let _ = confy::store("clippy", None, &self.config);
+        let _ = confy::store("clippo", None, &self.config);
 
         // Log the change
         tracing::info!("{field_name} changed in config.");
@@ -97,7 +97,7 @@ impl ClippyApp {
     }
 
     pub fn listen_for_history_updates(self: Arc<Self>) {
-        let clippy_app = Arc::clone(&self);
+        let clippo_app = Arc::clone(&self);
         thread::spawn(move || -> Result<()> {
             let listener = TcpListener::bind(format!("127.0.0.1:{DAEMON_LISTENING_PORT}"))
                 .context(format!(
@@ -116,7 +116,7 @@ impl ClippyApp {
                             .context("Failed to read from stream")?;
                         let request = String::from_utf8_lossy(&buffer);
 
-                        let mut history = clippy_app
+                        let mut history = clippo_app
                             .history_cache
                             .lock()
                             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;

@@ -1,10 +1,10 @@
 [Unit]
-Description=Clippy Daemon
+Description=Clippo Daemon
 After=network.target
 
 [Service]
 WorkingDirectory=/usr/local/bin
-ExecStart=clippy_daemon
+ExecStart=clippo_daemon
 Restart=on-failure
 RestartSec=500ms
 Group=sudo

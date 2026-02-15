@@ -6,7 +6,7 @@ const DEFAULT_MINIMIZE_ON_CLEAR: bool = true;
 const DEFAULT_ENABLE_SEARCH: bool = true;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct ClippyConfig {
+pub struct ClippoConfig {
     pub dark_mode: bool,
     pub max_entry_display_length: usize,
     pub minimize_on_copy: bool,
@@ -14,7 +14,7 @@ pub struct ClippyConfig {
     pub enable_search: bool,
 }
 
-impl Default for ClippyConfig {
+impl Default for ClippoConfig {
     fn default() -> Self {
         Self {
             dark_mode: true,
