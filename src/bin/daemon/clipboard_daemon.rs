@@ -2,8 +2,8 @@ use crate::UI_LISTENING_PORT;
 use crate::UI_SENDING_PORT;
 
 use anyhow::{anyhow, Context, Result};
-use arboard::Clipboard;
-use core::panic;
+use arboard::{Clipboard, Error as ClipboardError, ImageData};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -15,9 +15,33 @@ const MAX_HISTORY_LENGTH: usize = 100;
 const CLIPBOARD_REFRESH_RATE_MS: u64 = 800;
 
 const STREAM_MAX_RETRIES: u32 = 5;
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub enum ClipboardHistoryEntry {
+    Text(String),
+    Image(ClipboardImageEntry),
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct ClipboardImageEntry {
+    pub width: usize,
+    pub height: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl ClipboardImageEntry {
+    fn from_image_data(image: ImageData<'_>) -> Self {
+        Self {
+            width: image.width,
+            height: image.height,
+            bytes: image.bytes.into_owned(),
+        }
+    }
+}
+
 pub struct Clippo {
     clipboard: Mutex<Clipboard>,
-    history: Mutex<Vec<String>>,
+    history: Mutex<Vec<ClipboardHistoryEntry>>,
 }
 
 impl Clippo {
@@ -35,24 +59,18 @@ impl Clippo {
 
     /// Monitor clipboard changes and send a request to the UI on copy.
     pub fn monitor_clipboard_events(&self) -> Result<()> {
-        let mut consecutive_clipboard_failures = 0;
-
         loop {
             if let Ok(mut clipboard) = self.clipboard.lock() {
-                match clipboard.get_text() {
-                    Ok(content) => {
-                        if consecutive_clipboard_failures > 0 {
-                            consecutive_clipboard_failures = 0
-                        }
-
+                match Self::read_clipboard_entry(&mut clipboard) {
+                    Ok(Some(entry)) => {
                         let mut history = self
                             .history
                             .lock()
                             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
-                        if !history.contains(&content) && !content.trim().is_empty() {
+                        if !history.contains(&entry) {
                             // Insert new value at first index
-                            history.insert(0, content);
+                            history.insert(0, entry);
 
                             let history_len = history.len();
                             // Keep only the wanted number of entries
@@ -69,8 +87,8 @@ impl Clippo {
                                 Ok(stream) => match self.send_history(stream) {
                                     Ok(()) => {
                                         tracing::info!(
-                                        "Successfully sent history to UI after clipboard event ..."
-                                    );
+                                            "Successfully sent history to UI after clipboard event ..."
+                                        );
                                     }
                                     Err(e) => {
                                         tracing::error!(
@@ -98,20 +116,11 @@ impl Clippo {
                             }
                         }
                     }
-                    Err(clipboard_content_error) => {
+                    Ok(None) => {}
+                    Err(read_clipboard_error) => {
                         tracing::error!(
-                            "Error getting the clipboard content: {clipboard_content_error}"
+                            "Error getting clipboard content in supported formats: {read_clipboard_error}"
                         );
-                        consecutive_clipboard_failures += 1;
-                        // Setting an empty value to the clipboard in case it is empty, to prevent errors
-                        tracing::info!("Setting an arbitrary value to the clipboard to prevent read issues ...");
-                        clipboard.set_text("Hello Clippo !")?;
-
-                        if consecutive_clipboard_failures == 3 {
-                            panic!("Error getting the clipboard content 3 times in a row, aborting daemon run.")
-                        }
-
-                        thread::sleep(Duration::from_millis(CLIPBOARD_REFRESH_RATE_MS));
                     }
                 }
             }
@@ -208,8 +217,7 @@ impl Clippo {
             .lock()
             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
-        let history_data = Vec::from(history.clone());
-        let serialized_history = ron::ser::to_string(&history_data)
+        let serialized_history = ron::ser::to_string(&*history)
             .context("Could not serialize history when saving to file.")?;
 
         file.write_all(serialized_history.as_bytes())
@@ -222,24 +230,45 @@ impl Clippo {
 
     /// Loads the current history from the file.
     /// Static method.
-    fn load_history() -> Result<Vec<String>> {
-        let history: Vec<String> = fs::File::open(HISTORY_FILE_PATH)
-            // We add some context to the rror in case we cannot open the file
-            .context(format!("Could not open \"{HISTORY_FILE_PATH}\""))
-            // And we chain an operation to deserialize the content if the opening works
-            .and_then(|file| {
-                let reader = BufReader::new(file);
-                ron::de::from_reader(reader).context("Error deserializing clipboard history.")
-            })
-            // if any of these steps fail, we fall back to an empty Vec<String> and notify the user
-            .unwrap_or_else(|load_error| {
-                eprintln!(
-                    "Could not load history: {load_error}\nFalling back to an empty history.\n",
-                );
-                Vec::new()
-            });
+    fn load_history() -> Result<Vec<ClipboardHistoryEntry>> {
+        let typed_history_result: Result<Vec<ClipboardHistoryEntry>> =
+            fs::File::open(HISTORY_FILE_PATH)
+                .context(format!("Could not open \"{HISTORY_FILE_PATH}\""))
+                .and_then(|file| {
+                    let reader = BufReader::new(file);
+                    ron::de::from_reader(reader).context("Error deserializing clipboard history.")
+                });
 
-        Ok(history)
+        match typed_history_result {
+            Ok(history) => Ok(history),
+            Err(typed_load_error) => {
+                let legacy_history_result: Result<Vec<String>> = fs::File::open(HISTORY_FILE_PATH)
+                    .context(format!("Could not open \"{HISTORY_FILE_PATH}\""))
+                    .and_then(|file| {
+                        let reader = BufReader::new(file);
+                        ron::de::from_reader(reader)
+                            .context("Error deserializing legacy clipboard history.")
+                    });
+
+                match legacy_history_result {
+                    Ok(legacy_history) => {
+                        tracing::warn!(
+                            "Loaded legacy string-only clipboard history format in daemon; data will be migrated on next save."
+                        );
+                        Ok(legacy_history
+                            .into_iter()
+                            .map(ClipboardHistoryEntry::Text)
+                            .collect())
+                    }
+                    Err(load_error) => {
+                        eprintln!(
+                            "Could not load typed history: {typed_load_error}\nCould not load legacy history: {load_error}\nFalling back to an empty history.\n",
+                        );
+                        Ok(Vec::new())
+                    }
+                }
+            }
+        }
     }
 
     fn clear_history(&self) -> Result<()> {
@@ -249,7 +278,13 @@ impl Clippo {
             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
         history.clear(); // Clear history in memory
-        fs::remove_file(HISTORY_FILE_PATH).context("Could not delete the history file.")?;
+        match fs::remove_file(HISTORY_FILE_PATH) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow!("Could not delete the history file: {error}"));
+            }
+        }
 
         // We could also clear the current state of the keyboard
         // self.clipboard.clear()?;
@@ -262,9 +297,12 @@ impl Clippo {
             .lock()
             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
+        let serialized_history = ron::ser::to_string(&*history)
+            .context("Could not serialize history when sending to UI.")?;
+
         for attempt in 0..STREAM_MAX_RETRIES {
             let send_result = (|| -> Result<()> {
-                stream.write_all(format!("{:?}\n", history).as_bytes())?;
+                stream.write_all(serialized_history.as_bytes())?;
                 stream
                     .shutdown(Shutdown::Write)
                     .context("Could not close the TCP connection when sending history.")?;
@@ -289,5 +327,31 @@ impl Clippo {
             "Could not send history to UI {} times in a row",
             STREAM_MAX_RETRIES
         ))
+    }
+
+    fn read_clipboard_entry(clipboard: &mut Clipboard) -> Result<Option<ClipboardHistoryEntry>> {
+        match clipboard.get_text() {
+            Ok(content) => {
+                if !content.trim().is_empty() {
+                    return Ok(Some(ClipboardHistoryEntry::Text(content)));
+                }
+            }
+            Err(ClipboardError::ContentNotAvailable) => {}
+            Err(text_error) => {
+                return Err(anyhow!(
+                    "Could not get clipboard text content: {text_error}"
+                ));
+            }
+        }
+
+        match clipboard.get_image() {
+            Ok(image) => Ok(Some(ClipboardHistoryEntry::Image(
+                ClipboardImageEntry::from_image_data(image),
+            ))),
+            Err(ClipboardError::ContentNotAvailable) => Ok(None),
+            Err(image_error) => Err(anyhow!(
+                "Could not get clipboard image content: {image_error}"
+            )),
+        }
     }
 }

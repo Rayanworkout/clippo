@@ -2,17 +2,42 @@ use crate::config::ClippoConfig;
 use crate::DAEMON_LISTENING_PORT;
 use crate::DAEMON_SENDING_PORT;
 use anyhow::{anyhow, Context, Result};
-use arboard::Clipboard;
+use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use ron::de::from_str;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub enum ClipboardHistoryEntry {
+    Text(String),
+    Image(ClipboardImageEntry),
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct ClipboardImageEntry {
+    pub width: usize,
+    pub height: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl ClipboardImageEntry {
+    fn to_image_data(&self) -> ImageData<'_> {
+        ImageData {
+            width: self.width,
+            height: self.height,
+            bytes: Cow::Borrowed(&self.bytes),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct ClippoApp {
-    pub history_cache: Arc<Mutex<Vec<String>>>,
+    pub history_cache: Arc<Mutex<Vec<ClipboardHistoryEntry>>>,
     pub search_query: String,
     pub config: ClippoConfig,
     pub style_needs_update: bool,
@@ -24,7 +49,7 @@ pub struct ClippoApp {
 
 impl ClippoApp {
     pub fn new() -> Self {
-        let empty_cache = Vec::new();
+        let empty_cache: Vec<ClipboardHistoryEntry> = Vec::new();
 
         let clippo = ClippoApp {
             history_cache: Arc::new(Mutex::new(empty_cache)),
@@ -67,25 +92,83 @@ impl ClippoApp {
         tracing::info!("{field_name} changed in config.");
     }
 
-    pub fn copy_to_clipboard(&self, value: &str) -> Result<()> {
-        let mut clipboard = Clipboard::new().context("Could not initialize clipboard backend.")?;
-        clipboard
-            .set_text(value)
-            .context("Could not set clipboard value.")?;
-        tracing::info!("Successfully set value to clipboard.");
-        Ok(())
+    pub fn copy_to_clipboard(&self, value: &ClipboardHistoryEntry) -> Result<()> {
+        const CLIPBOARD_WRITE_RETRIES: usize = 6;
+        const CLIPBOARD_RETRY_DELAY_MS: u64 = 50;
+
+        if let ClipboardHistoryEntry::Image(image) = value {
+            let expected_len = image
+                .width
+                .checked_mul(image.height)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .ok_or_else(|| anyhow!("Image dimensions are too large to compute byte length."))?;
+
+            if image.bytes.len() != expected_len {
+                return Err(anyhow!(
+                    "Image buffer has invalid length: expected {expected_len} bytes, got {} bytes.",
+                    image.bytes.len()
+                ));
+            }
+        }
+
+        let mut last_error = None;
+        for _ in 0..CLIPBOARD_WRITE_RETRIES {
+            let write_result = (|| -> Result<()> {
+                let mut clipboard =
+                    Clipboard::new().context("Could not initialize clipboard backend.")?;
+                match value {
+                    ClipboardHistoryEntry::Text(text) => clipboard
+                        .set_text(text)
+                        .context("Could not set clipboard text value.")?,
+                    ClipboardHistoryEntry::Image(image) => clipboard
+                        .set_image(image.to_image_data())
+                        .context("Could not set clipboard image value.")?,
+                }
+                Ok(())
+            })();
+
+            match write_result {
+                Ok(()) => {
+                    tracing::info!("Successfully set value to clipboard.");
+                    return Ok(());
+                }
+                Err(error) => {
+                    let is_occupied = error
+                        .downcast_ref::<ClipboardError>()
+                        .map(|clipboard_error| {
+                            matches!(clipboard_error, ClipboardError::ClipboardOccupied)
+                        })
+                        .unwrap_or(false);
+                    last_error = Some(error);
+                    if is_occupied {
+                        thread::sleep(Duration::from_millis(CLIPBOARD_RETRY_DELAY_MS));
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("Could not set clipboard value after retries.")))
     }
 
-    pub fn preview_entry(&self, value: &str) -> String {
-        let flat = value.replace('\n', " ").replace('\r', "");
-        if flat.chars().count() > self.config.max_entry_display_length {
-            let truncated: String = flat
-                .chars()
-                .take(self.config.max_entry_display_length)
-                .collect();
-            format!("{truncated}...")
-        } else {
-            flat
+    pub fn preview_entry(&self, value: &ClipboardHistoryEntry) -> String {
+        match value {
+            ClipboardHistoryEntry::Text(text) => {
+                let flat = text.replace('\n', " ").replace('\r', "");
+                if flat.chars().count() > self.config.max_entry_display_length {
+                    let truncated: String = flat
+                        .chars()
+                        .take(self.config.max_entry_display_length)
+                        .collect();
+                    format!("{truncated}...")
+                } else {
+                    flat
+                }
+            }
+            ClipboardHistoryEntry::Image(image) => {
+                format!("Image ({}x{})", image.width, image.height)
+            }
         }
     }
 
@@ -118,8 +201,7 @@ impl ClippoApp {
                             .lock()
                             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
-                        *history =
-                            from_str(&request).context("Failed to parse history with RON")?;
+                        *history = Self::parse_history_payload(&request)?;
                     }
                     Err(e) => {
                         tracing::error!(
@@ -160,8 +242,7 @@ impl ClippoApp {
             .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
 
         if let Ok(old_history) = request_result {
-            *history =
-                from_str(&old_history).context("Failed to parse initial history with RON")?;
+            *history = Self::parse_history_payload(&old_history)?;
         } else {
             history.clear();
             tracing::error!("Could not fetch history from clipboard daemon.\nFalling back to an empty history.\n");
@@ -202,5 +283,25 @@ impl ClippoApp {
         }
 
         Ok(())
+    }
+
+    fn parse_history_payload(payload: &str) -> Result<Vec<ClipboardHistoryEntry>> {
+        match from_str::<Vec<ClipboardHistoryEntry>>(payload) {
+            Ok(entries) => Ok(entries),
+            Err(primary_parse_error) => match from_str::<Vec<String>>(payload) {
+                Ok(legacy_entries) => {
+                    tracing::warn!(
+                        "Loaded legacy string-only clipboard history format in UI; consider restarting daemon to migrate."
+                    );
+                    Ok(legacy_entries
+                        .into_iter()
+                        .map(ClipboardHistoryEntry::Text)
+                        .collect())
+                }
+                Err(_) => Err(anyhow!(
+                    "Failed to parse clipboard history payload: {primary_parse_error}"
+                )),
+            },
+        }
     }
 }

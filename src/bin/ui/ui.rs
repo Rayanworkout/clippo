@@ -1,4 +1,4 @@
-use crate::clippo_app::ClippoApp;
+use crate::clippo_app::{ClipboardHistoryEntry, ClippoApp};
 
 use eframe::egui;
 use std::time::Duration;
@@ -48,8 +48,20 @@ impl eframe::App for ClippoApp {
             let total = history.len();
             let filtered = history
                 .iter()
-                .filter(|value| {
-                    normalized_query.is_empty() || value.to_lowercase().contains(&normalized_query)
+                .filter(|entry| {
+                    if normalized_query.is_empty() {
+                        return true;
+                    }
+
+                    match entry {
+                        ClipboardHistoryEntry::Text(value) => {
+                            value.to_lowercase().contains(&normalized_query)
+                        }
+                        ClipboardHistoryEntry::Image(image) => {
+                            format!("image {}x{}", image.width, image.height)
+                                .contains(&normalized_query)
+                        }
+                    }
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -98,7 +110,7 @@ impl eframe::App for ClippoApp {
                 if let Some(selected_idx) = self.selected_entry_index {
                     if let Some(selected_value) = filtered_history.get(selected_idx).cloned() {
                         if let Err(error) = self.copy_to_clipboard(&selected_value) {
-                            tracing::error!("Could not copy selected entry with Enter: {error}");
+                            tracing::error!("Could not copy selected entry with Enter: {error:#}");
                             self.set_last_action("Failed to copy entry to clipboard.");
                         } else {
                             self.confirm_clear = false;
@@ -256,8 +268,17 @@ impl eframe::App for ClippoApp {
 
                 for (idx, value) in filtered_history.iter().enumerate() {
                     let preview = self.preview_entry(value);
-                    let chars = value.chars().count();
-                    let lines = value.lines().count().max(1);
+                    let metadata = match value {
+                        ClipboardHistoryEntry::Text(text) => {
+                            let chars = text.chars().count();
+                            let lines = text.lines().count().max(1);
+                            format!("{chars} chars, {lines} lines")
+                        }
+                        ClipboardHistoryEntry::Image(image) => {
+                            let kb = image.bytes.len() / 1024;
+                            format!("{}x{}, {} KB", image.width, image.height, kb)
+                        }
+                    };
                     let is_selected = self.selected_entry_index == Some(idx);
 
                     let mut entry_frame =
@@ -277,11 +298,7 @@ impl eframe::App for ClippoApp {
                             );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{chars} chars, {lines} lines"))
-                                        .small()
-                                        .weak(),
-                                );
+                                ui.label(egui::RichText::new(metadata).small().weak());
                                 ui.with_layout(
                                     egui::Layout::right_to_left(egui::Align::Center),
                                     |ui| {
@@ -316,7 +333,7 @@ impl eframe::App for ClippoApp {
                     if clicked {
                         self.selected_entry_index = Some(idx);
                         if let Err(error) = self.copy_to_clipboard(value) {
-                            tracing::error!("Could not set clipboard value on click: {error}");
+                            tracing::error!("Could not set clipboard value on click: {error:#}");
                             self.set_last_action("Failed to copy entry to clipboard.");
                         } else {
                             self.confirm_clear = false;
