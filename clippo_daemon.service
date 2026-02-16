@@ -1,13 +1,14 @@
 [Unit]
 Description=Clippo Daemon
-After=network.target
+After=graphical-session.target
+Wants=graphical-session.target
 
 [Service]
-WorkingDirectory=/usr/local/bin
-ExecStart=clippo_daemon
+Type=simple
+WorkingDirectory=%h/.local/share/clippo
+ExecStart=%h/.local/share/clippo/bin/clippo_daemon
 Restart=on-failure
-RestartSec=500ms
-Group=sudo
+RestartSec=1s
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
