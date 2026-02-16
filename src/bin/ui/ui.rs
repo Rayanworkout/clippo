@@ -134,7 +134,7 @@ impl eframe::App for ClippoApp {
                         self.config.dark_mode = !self.config.dark_mode;
                         self.toggle_config_field("dark_mode");
                     }
-                    ui.menu_button("⚙️", |ui| {
+                    ui.menu_button("☰", |ui| {
                         // Handle the config update with the toggle_config_field method to avoid code repetition
                         if ui
                             .checkbox(&mut self.config.minimize_on_copy, "Minimize on copy")
