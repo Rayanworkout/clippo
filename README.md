@@ -43,6 +43,87 @@ chmod u+x ./linux_install.sh
 ./linux_install.sh
 ```
 
-The application should now be running and listening for your clipboard changes.
+This installs Clippo as a **user service** (`systemd --user`) and starts the daemon.
 
-- The history file `clipboard_history.ron` will be located in the folder from which the binary was launched.
+Useful commands:
+
+```bash
+systemctl --user status clippo_daemon.service
+clippo_ui
+```
+
+## Architecture (Daemon + UI)
+
+Clippo uses **two binaries by design**:
+
+- `daemon` (`src/bin/daemon`)
+- `ui` (`src/bin/ui`)
+
+Why two binaries:
+
+- The daemon is long-lived and keeps collecting clipboard history in the background.
+- The UI is short-lived and can be opened/closed on demand without losing history.
+
+### Responsibilities
+
+- `daemon`
+  - Polls the system clipboard.
+  - Deduplicates and stores entries.
+  - Persists history to `.clipboard_history.ron`.
+  - Serves history to UI and handles reset commands.
+
+- `ui`
+  - Displays history and preferences.
+  - Requests initial history on startup.
+  - Receives live history updates from daemon.
+  - Sends actions (ex: clear history) back to daemon.
+
+### Local IPC Contract
+
+Communication is local TCP on `127.0.0.1`:
+
+- `7879`: daemon listens for UI requests (`GET_HISTORY`, `RESET_HISTORY`).
+- `7878`: UI listens for daemon push updates (updated history payload).
+
+This split keeps the UI simple while the daemon remains the source of truth.
+
+## Local Development
+
+Run in two terminals from repo root:
+
+```bash
+# Terminal 1
+cargo run --bin daemon
+
+# Terminal 2
+cargo run --bin ui
+```
+
+Notes:
+
+- If the daemon is not running, UI starts with empty/fallback history.
+- The history file path is relative to daemon working directory.
+  - In local dev, this is usually the repo root.
+  - With Linux user service install, it is `~/.local/share/clippo/.clipboard_history.ron`.
+
+## Contributing / Pull Requests
+
+If you want to open a PR:
+
+1. Fork and clone the repo.
+2. Create a branch: `git checkout -b feat/your-change`.
+3. Make your changes.
+4. Validate locally:
+   - `cargo fmt`
+   - `cargo check --bin daemon`
+   - `cargo check --bin ui`
+5. Run both binaries manually (`daemon` + `ui`) and verify behavior.
+6. Open the PR with:
+   - What changed.
+   - Why it changed.
+   - Screenshots for UI changes (if relevant).
+
+Design guideline:
+
+- Keep daemon and UI loosely coupled through the current localhost protocol.
+- Avoid tying daemon lifecycle to UI lifecycle (daemon should keep running independently).
