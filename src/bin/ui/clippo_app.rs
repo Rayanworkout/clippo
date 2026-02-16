@@ -3,12 +3,12 @@ use crate::DAEMON_LISTENING_PORT;
 use crate::DAEMON_SENDING_PORT;
 use anyhow::{anyhow, Context, Result};
 use arboard::Clipboard;
-use eframe::egui;
 use ron::de::from_str;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub struct ClippoApp {
@@ -16,6 +16,10 @@ pub struct ClippoApp {
     pub search_query: String,
     pub config: ClippoConfig,
     pub style_needs_update: bool,
+    pub last_action: Option<(String, Instant)>,
+    pub confirm_clear: bool,
+    pub search_focus_requested: bool,
+    pub selected_entry_index: Option<usize>,
 }
 
 impl ClippoApp {
@@ -27,6 +31,10 @@ impl ClippoApp {
             search_query: String::new(),
             config: confy::load("clippo", None).unwrap_or_default(),
             style_needs_update: true,
+            last_action: None,
+            confirm_clear: false,
+            search_focus_requested: false,
+            selected_entry_index: None,
         };
 
         if let Err(initial_history_error) = clippo.fill_initial_history() {
@@ -59,41 +67,30 @@ impl ClippoApp {
         tracing::info!("{field_name} changed in config.");
     }
 
-    /// Helper method to display a single history entry.
-    /// It is called within the loop iterating through clipboard history
-    pub fn display_history_entry(&self, ui: &mut egui::Ui, ctx: &egui::Context, value: &str) {
-        ui.vertical_centered_justified(|ui| {
-            // We create a short version of the value but
-            // we keep the original to be copied
-            let short_value = if value.len() > self.config.max_entry_display_length {
-                let truncated: String = value
-                    .chars()
-                    .take(self.config.max_entry_display_length)
-                    .collect();
-                format!("{}...", truncated)
-            } else {
-                value.to_string()
-            };
+    pub fn copy_to_clipboard(&self, value: &str) -> Result<()> {
+        let mut clipboard = Clipboard::new().context("Could not initialize clipboard backend.")?;
+        clipboard
+            .set_text(value)
+            .context("Could not set clipboard value.")?;
+        tracing::info!("Successfully set value to clipboard.");
+        Ok(())
+    }
 
-            if ui.button(short_value).clicked() {
-                if let Ok(mut clipboard) = Clipboard::new() {
-                    match clipboard.set_text(value) {
-                        Ok(()) => {
-                            tracing::info!("Successfully set value to clipboard.");
-                        }
-                        Err(e) => {
-                            tracing::error!("Could not set clipboard value on click: {e}");
-                        }
-                    }
-                }
+    pub fn preview_entry(&self, value: &str) -> String {
+        let flat = value.replace('\n', " ").replace('\r', "");
+        if flat.chars().count() > self.config.max_entry_display_length {
+            let truncated: String = flat
+                .chars()
+                .take(self.config.max_entry_display_length)
+                .collect();
+            format!("{truncated}...")
+        } else {
+            flat
+        }
+    }
 
-                if self.config.minimize_on_copy {
-                    // Minimize after copying
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                }
-            }
-            ui.add_space(10.0);
-        });
+    pub fn set_last_action<S: Into<String>>(&mut self, message: S) {
+        self.last_action = Some((message.into(), Instant::now()));
     }
 
     pub fn listen_for_history_updates(self: Arc<Self>) {
@@ -166,7 +163,7 @@ impl ClippoApp {
             *history =
                 from_str(&old_history).context("Failed to parse initial history with RON")?;
         } else {
-            *history = from_str("")?;
+            history.clear();
             tracing::error!("Could not fetch history from clipboard daemon.\nFalling back to an empty history.\n");
         }
         tracing::info!("Successfully loaded initial history from clipboard daemon ...");
@@ -189,8 +186,8 @@ impl ClippoApp {
 
             // Send the RESET_HISTORY request to the server
             stream
-                .write("RESET_HISTORY\n".as_bytes())
-                .expect("Failed to write to stream when trying to clear history.");
+                .write_all("RESET_HISTORY\n".as_bytes())
+                .context("Failed to write to stream when trying to clear history.")?;
 
             // Read the server's response into a string.
             let mut response = String::new();

@@ -16,10 +16,9 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([350., 450.])
-            .with_max_inner_size([350., 450.])
+            .with_inner_size([330., 460.])
             .with_maximize_button(false)
-            .with_min_inner_size([200., 300.])
+            .with_min_inner_size([280., 380.])
             .with_position([250., 340.]),
         centered: true,
         ..Default::default()
