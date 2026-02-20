@@ -23,6 +23,10 @@ SERVICE_SRC="$SCRIPT_DIR/clippo_daemon.service"
 SERVICE_NAME="clippo_daemon.service"
 SERVICE_DST="$SYSTEMD_USER_DIR/$SERVICE_NAME"
 
+echo "Building last version ..."
+
+cargo build --release
+
 echo "Installing Clippo for user: $USER"
 
 # ---- checks ----

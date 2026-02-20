@@ -115,7 +115,9 @@ impl eframe::App for ClippoApp {
                         } else {
                             self.confirm_clear = false;
                             self.set_last_action("Entry copied to clipboard.");
-                            if self.config.minimize_on_copy {
+                            if self.config.exit_on_copy {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else if self.config.minimize_on_copy {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         }
@@ -155,7 +157,13 @@ impl eframe::App for ClippoApp {
                             self.toggle_config_field("minimize_on_copy");
                         }
                         if ui
-                            .checkbox(&mut self.config.minimize_on_clear, "Minimize on clear")
+                            .checkbox(&mut self.config.exit_on_copy, "Exit on copy")
+                            .clicked()
+                        {
+                            self.toggle_config_field("exit_on_copy");
+                        }
+                        if ui
+                            .checkbox(&mut self.config.minimize_on_clear, "Exit on clear")
                             .clicked()
                         {
                             self.toggle_config_field("minimize_on_clear");
@@ -233,7 +241,7 @@ impl eframe::App for ClippoApp {
                             self.set_last_action("History cleared.");
                             tracing::info!("History cleared.");
                             if self.config.minimize_on_clear {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
                         }
                         self.confirm_clear = false;
@@ -338,7 +346,9 @@ impl eframe::App for ClippoApp {
                         } else {
                             self.confirm_clear = false;
                             self.set_last_action("Entry copied to clipboard.");
-                            if self.config.minimize_on_copy {
+                            if self.config.exit_on_copy {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            } else if self.config.minimize_on_copy {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         }

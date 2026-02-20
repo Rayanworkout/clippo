@@ -74,6 +74,7 @@ impl ClippoApp {
     pub fn toggle_config_field(&mut self, field_name: &str) {
         let allowed_settings: Vec<&str> = vec![
             "minimize_on_copy",
+            "exit_on_copy",
             "minimize_on_clear",
             "dark_mode",
             "max_entry_display_length",
