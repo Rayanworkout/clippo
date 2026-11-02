@@ -7,7 +7,7 @@ use ron::de::from_str;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,13 +45,14 @@ pub struct ClippoApp {
     pub confirm_clear: bool,
     pub search_focus_requested: bool,
     pub selected_entry_index: Option<usize>,
+    pub capture_paused: bool,
 }
 
 impl ClippoApp {
     pub fn new() -> Self {
         let empty_cache: Vec<ClipboardHistoryEntry> = Vec::new();
 
-        let clippo = ClippoApp {
+        let mut clippo = ClippoApp {
             history_cache: Arc::new(Mutex::new(empty_cache)),
             search_query: String::new(),
             config: confy::load("clippo", None).unwrap_or_default(),
@@ -60,10 +61,15 @@ impl ClippoApp {
             confirm_clear: false,
             search_focus_requested: false,
             selected_entry_index: None,
+            capture_paused: false,
         };
 
         if let Err(initial_history_error) = clippo.fill_initial_history() {
             tracing::error!("An error occured when loading initial history in Clippo UI: {initial_history_error}.");
+        }
+
+        if let Ok(state) = Self::capture_state_from_daemon() {
+            clippo.capture_paused = state;
         }
 
         clippo
@@ -284,6 +290,63 @@ impl ClippoApp {
         }
 
         Ok(())
+    }
+
+    fn daemon_request(command: &str, body: Option<&str>) -> Result<String> {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{DAEMON_SENDING_PORT}"))
+            .context("Could not connect to clipboard daemon.")?;
+        stream.write_all(command.as_bytes())?;
+        stream.write_all(b"\n")?;
+        if let Some(body) = body {
+            stream.write_all(body.as_bytes())?;
+        }
+        stream.shutdown(Shutdown::Write)?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        Ok(response)
+    }
+
+    fn capture_state_from_daemon() -> Result<bool> {
+        match Self::daemon_request("GET_CAPTURE_STATE", None)?.as_str() {
+            "PAUSED" => Ok(true),
+            "RUNNING" => Ok(false),
+            response => Err(anyhow!("Unexpected capture state: {response}")),
+        }
+    }
+
+    pub fn set_capture_paused(&mut self, paused: bool) -> Result<()> {
+        let command = if paused {
+            "PAUSE_CAPTURE"
+        } else {
+            "RESUME_CAPTURE"
+        };
+        if Self::daemon_request(command, None)? != "OK" {
+            return Err(anyhow!("Daemon did not acknowledge capture state change."));
+        }
+        self.capture_paused = paused;
+        Ok(())
+    }
+
+    pub fn delete_entry(&mut self, entry: &ClipboardHistoryEntry) -> Result<()> {
+        let payload = ron::ser::to_string(entry)?;
+        match Self::daemon_request("DELETE_ENTRY", Some(&payload))?.as_str() {
+            "OK" => {
+                let mut history = self
+                    .history_cache
+                    .lock()
+                    .map_err(|e| anyhow!("Could not acquire history lock: {e}"))?;
+                if let Some(index) = history.iter().position(|saved| saved == entry) {
+                    history.remove(index);
+                }
+                Ok(())
+            }
+            "NOT_FOUND" => {
+                self.fill_initial_history()?;
+                Err(anyhow!("Entry is no longer in history."))
+            }
+            "BAD_REQUEST" => Err(anyhow!("Restart the daemon to enable deletion.")),
+            response => Err(anyhow!("Unexpected delete response: {response}")),
+        }
     }
 
     fn parse_history_payload(payload: &str) -> Result<Vec<ClipboardHistoryEntry>> {

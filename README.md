@@ -11,6 +11,7 @@ Whether you're a developer, writer, or power user, Clippo simplifies your workfl
 ## Features
 
 - **Clipboard History**: Access up to 100 previously copied items with ease.
+- **History controls**: Delete an individual entry or pause capture without losing saved history. Capture resumes when requested; a daemon restart starts with capture enabled.
 - **Cross-Platform**: Works on Windows, macOS, and Linux.
 - **Customizable Settings**:
   - Set a maximum display length for clipboard entries.
@@ -82,7 +83,7 @@ Why two binaries:
 
 Communication is local TCP on `127.0.0.1`:
 
-- `7879`: daemon listens for UI requests (`GET_HISTORY`, `RESET_HISTORY`).
+- `7879`: daemon listens for UI requests (`GET_HISTORY`, `RESET_HISTORY`, `DELETE_ENTRY`, `GET_CAPTURE_STATE`, `PAUSE_CAPTURE`, `RESUME_CAPTURE`).
 - `7878`: UI listens for daemon push updates (updated history payload).
 
 This split keeps the UI simple while the daemon remains the source of truth.

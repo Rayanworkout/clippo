@@ -5,8 +5,9 @@ use anyhow::{anyhow, Context, Result};
 use arboard::{Clipboard, Error as ClipboardError, ImageData};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::{thread, time::Duration};
 
@@ -42,6 +43,31 @@ impl ClipboardImageEntry {
 pub struct Clippo {
     clipboard: Mutex<Clipboard>,
     history: Mutex<Vec<ClipboardHistoryEntry>>,
+    capture_state: Mutex<CaptureState>,
+}
+
+#[derive(Default)]
+struct CaptureState {
+    paused: bool,
+    skip_next_read: bool,
+    suppressed_entry: Option<ClipboardHistoryEntry>,
+}
+
+impl CaptureState {
+    fn set_paused(&mut self, paused: bool) {
+        if self.paused && !paused {
+            self.skip_next_read = true;
+        }
+        self.paused = paused;
+    }
+
+    fn should_capture(&mut self, entry: &ClipboardHistoryEntry) -> bool {
+        if self.suppressed_entry.as_ref() == Some(entry) {
+            return false;
+        }
+        self.suppressed_entry = None;
+        true
+    }
 }
 
 impl Clippo {
@@ -54,74 +80,72 @@ impl Clippo {
         Ok(Self {
             clipboard: Clipboard::new().context("Could not create a clipboard instance, the listener daemon can not run: {clipboard_error}")?.into(),
             history: Self::load_history()?.into(),
+            capture_state: Mutex::new(CaptureState::default()),
         })
     }
 
     /// Monitor clipboard changes and send a request to the UI on copy.
     pub fn monitor_clipboard_events(&self) -> Result<()> {
+        let mut last_seen = None;
         loop {
+            let mut capture_state = self
+                .capture_state
+                .lock()
+                .map_err(|e| anyhow!("Could not acquire capture state lock: {e}"))?;
+            if capture_state.paused {
+                drop(capture_state);
+                thread::sleep(Duration::from_millis(CLIPBOARD_REFRESH_RATE_MS));
+                continue;
+            }
+
+            let mut history_changed = false;
             if let Ok(mut clipboard) = self.clipboard.lock() {
                 match Self::read_clipboard_entry(&mut clipboard) {
                     Ok(Some(entry)) => {
-                        let mut history = self
-                            .history
-                            .lock()
-                            .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
-
-                        if !history.contains(&entry) {
-                            // Insert new value at first index
-                            history.insert(0, entry);
-
-                            let history_len = history.len();
-                            // Keep only the wanted number of entries
-                            if history_len > MAX_HISTORY_LENGTH {
-                                history.pop();
-                            }
-
-                            // Explicitly drop the lock otherwise save_history() won't be
-                            // able to access the variable
-                            drop(history);
-
-                            // Send the TCP request to the UI
-                            match TcpStream::connect(format!("127.0.0.1:{UI_SENDING_PORT}")) {
-                                Ok(stream) => match self.send_history(stream) {
-                                    Ok(()) => {
-                                        tracing::info!(
-                                            "Successfully sent history to UI after clipboard event ..."
-                                        );
+                        // shortcut: polling cannot detect copying unchanged content, use platform events if repeat copies must count.
+                        let should_capture = capture_state.should_capture(&entry);
+                        if capture_state.skip_next_read {
+                            last_seen = Some(entry);
+                            capture_state.skip_next_read = false;
+                        } else if last_seen.as_ref() != Some(&entry) {
+                            last_seen = Some(entry.clone());
+                            if should_capture {
+                                let mut history = self
+                                    .history
+                                    .lock()
+                                    .map_err(|e| anyhow!("Could not acquire history lock: {e}"))?;
+                                if !history.contains(&entry) {
+                                    history.insert(0, entry);
+                                    if history.len() > MAX_HISTORY_LENGTH {
+                                        history.pop();
                                     }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "An error occured when sending history to UI after clipboard event: {e} ..."
-                                        );
-                                    }
-                                },
-                                Err(_) => {
-                                    // UI not available
-                                }
-                            }
-
-                            // Save new history to file
-                            match self.save_history() {
-                                Ok(()) => {
-                                    tracing::info!(
-                                        "Successfully saved history after clipboard event ..."
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "An error occured when saving history to file after clipboard event: {e} ..."
-                                    );
+                                    history_changed = true;
                                 }
                             }
                         }
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        last_seen = None;
+                        capture_state.skip_next_read = false;
+                        capture_state.suppressed_entry = None;
+                    }
                     Err(read_clipboard_error) => {
                         tracing::error!(
                             "Error getting clipboard content in supported formats: {read_clipboard_error}"
                         );
                     }
+                }
+            }
+            drop(capture_state);
+
+            if history_changed {
+                if let Ok(stream) = TcpStream::connect(format!("127.0.0.1:{UI_SENDING_PORT}")) {
+                    if let Err(error) = self.send_history(stream) {
+                        tracing::error!("Could not send updated history to UI: {error}");
+                    }
+                }
+                if let Err(error) = self.save_history() {
+                    tracing::error!("Could not save updated history: {error}");
                 }
             }
 
@@ -136,8 +160,6 @@ impl Clippo {
     pub fn listen_for_ui(self: Arc<Self>) {
         let clippo = Arc::clone(&self);
         thread::spawn(move || -> Result<()> {
-            let mut buffer = [0; 512];
-
             let listener = TcpListener::bind(format!("127.0.0.1:{UI_LISTENING_PORT}")).context(
                 format!("UI listener could not bind to \"127.0.0.1:{UI_SENDING_PORT}\"."),
             )?;
@@ -147,13 +169,19 @@ impl Clippo {
                 let stream_success_result = (|| -> Result<()> {
                     let mut stream =
                         stream.context("Could not get stream from incoming UI connexion.")?;
-                    let size = stream
-                        .read(&mut buffer)
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut request = String::new();
+                    reader
+                        .by_ref()
+                        .take(64)
+                        .read_line(&mut request)
                         .context("Could not read the incoming request from the UI.")?;
-
-                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    if !request.ends_with('\n') {
+                        return Err(anyhow!("Invalid UI command."));
+                    }
 
                     if request.trim() == "GET_HISTORY" {
+                        drop(reader);
                         clippo
                             .send_history(stream.try_clone()?)
                             .context("Could not send the history to UI, stream.write() failed.")?;
@@ -162,6 +190,7 @@ impl Clippo {
                             "\"GET_HISTORY\" request received, sending current history to UI ..."
                         );
                     } else if request.trim() == "RESET_HISTORY" {
+                        drop(reader);
                         clippo
                             .clear_history()
                             .context("Could not clear history after UI request.")?;
@@ -171,7 +200,37 @@ impl Clippo {
                         tracing::info!(
                             "\"RESET_HISTORY\" request received, clearing current history ..."
                         );
+                    } else if request.trim() == "GET_CAPTURE_STATE" {
+                        drop(reader);
+                        let paused = clippo
+                            .capture_state
+                            .lock()
+                            .map_err(|e| anyhow!("Could not acquire capture state lock: {e}"))?
+                            .paused;
+                        stream.write_all(if paused { b"PAUSED" } else { b"RUNNING" })?;
+                    } else if request.trim() == "PAUSE_CAPTURE"
+                        || request.trim() == "RESUME_CAPTURE"
+                    {
+                        drop(reader);
+                        clippo
+                            .capture_state
+                            .lock()
+                            .map_err(|e| anyhow!("Could not acquire capture state lock: {e}"))?
+                            .set_paused(request.trim() == "PAUSE_CAPTURE");
+                        stream.write_all(b"OK")?;
+                    } else if request.trim() == "DELETE_ENTRY" {
+                        let mut payload = String::new();
+                        reader.read_to_string(&mut payload)?;
+                        drop(reader);
+                        let entry: ClipboardHistoryEntry = ron::de::from_str(&payload)
+                            .context("Could not deserialize entry to delete.")?;
+                        stream.write_all(if clippo.delete_entry(&entry)? {
+                            b"OK"
+                        } else {
+                            b"NOT_FOUND"
+                        })?;
                     } else {
+                        drop(reader);
                         stream.write(b"BAD_REQUEST")?;
                         tracing::warn!(
                             "Unexpected request received, sending back \"BAD_REQUEST\" to the UI ..."
@@ -205,27 +264,64 @@ impl Clippo {
 
     /// Save clipboard history to ron file.
     fn save_history(&self) -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(HISTORY_FILE_PATH)
-            .context(format!("Could not create or open {HISTORY_FILE_PATH}"))?;
-
         let history = self
             .history
             .lock()
-            .map_err(|e| anyhow!("Could not acquire history lock: {}", e))?;
+            .map_err(|e| anyhow!("Could not acquire history lock: {e}"))?;
+        Self::write_history(&history, Path::new(HISTORY_FILE_PATH))
+    }
 
-        let serialized_history = ron::ser::to_string(&*history)
+    fn write_history(history: &[ClipboardHistoryEntry], path: &Path) -> Result<()> {
+        let serialized_history = ron::ser::to_string(history)
             .context("Could not serialize history when saving to file.")?;
+        let temporary_path = path.with_extension("tmp");
+        let mut file = fs::File::create(&temporary_path)
+            .context(format!("Could not create {}", temporary_path.display()))?;
 
         file.write_all(serialized_history.as_bytes())
             .context(format!(
-                "Could not write serialized history to {HISTORY_FILE_PATH}"
+                "Could not write serialized history to {}",
+                temporary_path.display()
             ))?;
+        file.sync_all()
+            .context(format!("Could not sync {}", temporary_path.display()))?;
+        fs::rename(&temporary_path, path)
+            .context(format!("Could not replace {}", path.display()))?;
 
         Ok(())
+    }
+
+    fn delete_entry(&self, entry: &ClipboardHistoryEntry) -> Result<bool> {
+        let mut capture_state = self
+            .capture_state
+            .lock()
+            .map_err(|e| anyhow!("Could not acquire capture state lock: {e}"))?;
+        let mut history = self
+            .history
+            .lock()
+            .map_err(|e| anyhow!("Could not acquire history lock: {e}"))?;
+        let deleted =
+            Self::delete_history_entry(&mut history, entry, Path::new(HISTORY_FILE_PATH))?;
+        if deleted {
+            capture_state.suppressed_entry = Some(entry.clone());
+        }
+        Ok(deleted)
+    }
+
+    fn delete_history_entry(
+        history: &mut Vec<ClipboardHistoryEntry>,
+        entry: &ClipboardHistoryEntry,
+        path: &Path,
+    ) -> Result<bool> {
+        let Some(index) = history.iter().position(|saved| saved == entry) else {
+            return Ok(false);
+        };
+        let removed = history.remove(index);
+        if let Err(error) = Self::write_history(history, path) {
+            history.insert(index, removed);
+            return Err(error);
+        }
+        Ok(true)
     }
 
     /// Loads the current history from the file.
@@ -353,5 +449,57 @@ impl Clippo {
                 "Could not get clipboard image content: {image_error}"
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CaptureState, ClipboardHistoryEntry, Clippo};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn resuming_capture_skips_the_current_clipboard_value() {
+        let mut state = CaptureState::default();
+        state.set_paused(true);
+        state.set_paused(false);
+        assert!(!state.paused);
+        assert!(state.skip_next_read);
+    }
+
+    #[test]
+    fn deleted_current_entry_stays_suppressed_until_clipboard_changes() {
+        let secret = ClipboardHistoryEntry::Text("secret".into());
+        let other = ClipboardHistoryEntry::Text("other".into());
+        let mut state = CaptureState {
+            suppressed_entry: Some(secret.clone()),
+            ..Default::default()
+        };
+        assert!(!state.should_capture(&secret));
+        assert!(state.should_capture(&other));
+        assert!(state.should_capture(&secret));
+    }
+
+    #[test]
+    fn deleting_one_entry_updates_memory_and_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "clippo-delete-{}-{}.ron",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let keep = ClipboardHistoryEntry::Text("keep".into());
+        let remove = ClipboardHistoryEntry::Text("remove".into());
+        let mut history = vec![keep.clone(), remove.clone()];
+        Clippo::write_history(&history, &path).unwrap();
+
+        assert!(Clippo::delete_history_entry(&mut history, &remove, &path).unwrap());
+        assert_eq!(history, vec![keep.clone()]);
+        let saved: Vec<ClipboardHistoryEntry> =
+            ron::de::from_reader(fs::File::open(&path).unwrap()).unwrap();
+        assert_eq!(saved, vec![keep]);
+        fs::remove_file(path).unwrap();
     }
 }
